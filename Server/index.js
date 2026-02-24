@@ -2,30 +2,17 @@ require("dotenv").config();
 const { Server } = require("socket.io");
 const { createServer } = require("http");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
-const express = require("express");
-const path = require("path");
-const fs = require("fs-extra");
 
-const app = express();
-const httpServer = createServer(app);
+const httpServer = createServer();
 const io = new Server(httpServer, {
   cors: {
     origin: "*",
   },
 });
 
-// Ensure audios directory exists
-const audiosDir = path.join(__dirname, "audios");
-fs.ensureDirSync(audiosDir);
-
-// Serve audios folder as static
-app.use("/audios", express.static(audiosDir));
-
 // Configure Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({
-  model: "gemini-3-flash-preview", // Gemini 2.0 supports native audio output
-});
+const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
 
 io.on("connection", (socket) => {
   console.log(`>>> Connection established: ${socket.id}`);
@@ -35,70 +22,66 @@ io.on("connection", (socket) => {
     const userMessage = data.text;
     console.log(`Web Client says: ${userMessage}`);
 
-    // Broadcast user message
+    // Emit to everyone (Web and Unreal)
     io.emit("broadcast_message", { sender: "user", text: userMessage });
+
+    // Specifically for Unreal's bound events if it's listening to 'chat_response'
+    // This ensures both input and output are seen by Unreal
     io.emit("chat_response", { text: `User: ${userMessage}` });
 
     try {
-      // Correct way to request audio output in Gemini 2.0
-      // speechConfig and responseModalities belong inside generationConfig in v1beta
+      // Get response from Gemini with native audio modality request
       const result = await model.generateContent({
         contents: [{ role: "user", parts: [{ text: userMessage }] }],
         generationConfig: {
-          responseModalities: ["AUDIO"],
+          // Requesting both text and audio modalities
+          // Note: Some SDK versions might use different keys, but this is the standard for multimodal
+          responseModalities: ["text", "audio"],
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoife" } },
-          },
-        },
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: "Aoide" // A pleasant standard voice
+              }
+            }
+          }
+        }
       });
 
       const response = await result.response;
-
-
-
       let aiText = "";
-      let audioBase64 = null;
+      let audioData = null;
 
-      // Iterate through parts to find text and audio
-      for (const part of response.candidates[0].content.parts) {
-        if (part.text) aiText += part.text;
-        if (part.inlineData && part.inlineData.mimeType === "audio/wav") {
-          audioBase64 = part.inlineData.data;
+      // Extract text and audio from parts
+      if (response.candidates && response.candidates[0].content.parts) {
+        for (const part of response.candidates[0].content.parts) {
+          if (part.text) aiText += part.text;
+          if (part.inlineData && part.inlineData.mimeType && part.inlineData.mimeType.startsWith("audio/")) {
+            audioData = part.inlineData.data; // Base64
+          }
         }
       }
 
-      // If no audio was returned in inlineData, Gemini might have returned just text.
-      // In some versions, you might need to use a specific speech config.
-      // However, the requested flow is to save it as a file.
+      console.log(`Gemini says: ${aiText.substring(0, 50)}... ${audioData ? "(Audio generated)" : "(No audio)"}`);
 
-      let audioUrl = null;
-      if (audioBase64) {
-        const fileName = `speech_${Date.now()}.wav`;
-        const filePath = path.join(audiosDir, fileName);
-        await fs.writeFile(filePath, Buffer.from(audioBase64, "base64"));
-        audioUrl = `http://localhost:3000/audios/${fileName}`;
-      }
-
-      console.log(`Gemini says: ${aiText}`);
-
-      // Emit to everyone
+      // Emit to everyone (Web and Unreal)
       io.emit("broadcast_message", {
         sender: "gemini",
         text: aiText,
-        audioUrl: audioUrl
+        audio: audioData
       });
 
-      io.emit("chat_response", { text: `Gemini: ${aiText}` });
-      if (audioUrl) {
-        io.emit("audio_response", { url: audioUrl });
-      }
+      // Specifically for Unreal's bound events
+      io.emit("chat_response", {
+        text: `Gemini: ${aiText}`,
+        audio: audioData
+      });
 
     } catch (error) {
+
       console.error("Error calling Gemini AI:", error);
       io.emit("broadcast_message", { sender: "system", text: "Error: Failed to get AI response." });
     }
   });
-
 
   // Keep compatibility for Unreal's original 'send_message'
   socket.on("send_message", (data) => {

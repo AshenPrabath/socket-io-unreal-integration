@@ -20,19 +20,19 @@ function App() {
 
     socket.on('broadcast_message', (data) => {
       setMessages((prev) => [...prev, data]);
-      // If the message has an audioUrl (from Gemini), play it immediately
-      if (data.audioUrl) {
-        const audio = new Audio(data.audioUrl);
+
+      // Play audio if present and sender is gemini
+      if (data.audio && data.sender === 'gemini') {
+        const audio = new Audio(`data:audio/wav;base64,${data.audio}`);
         audio.play().catch(e => console.error("Audio playback failed:", e));
       }
     });
 
-    socket.on('audio_response', (data) => {
-      // Direct audio play for targeted events if needed
-      const audio = new Audio(data.url);
-      audio.play().catch(e => console.error("Audio playback failed:", e));
-    });
-
+    return () => {
+      socket.off('connect');
+      socket.off('disconnect');
+      socket.off('broadcast_message');
+    };
   }, []);
 
   useEffect(() => {
