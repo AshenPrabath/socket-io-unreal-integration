@@ -83,6 +83,22 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Handle messages from Gemini Live (Client-side)
+  socket.on("live_message", (data) => {
+    const sender = data.sender || "gemini";
+    console.log(`${sender} (Live): ${data.text}`);
+
+    // Broadcast to everyone as a 'live' message
+    io.emit("broadcast_message", {
+      sender: sender,
+      text: data.text,
+      isLive: true
+    });
+
+    // Also notify Unreal with a formatted string
+    io.emit("chat_response", { text: `${sender === 'user' ? 'User' : 'Gemini'} (Live): ${data.text}` });
+  });
+
   // Keep compatibility for Unreal's original 'send_message'
   socket.on("send_message", (data) => {
     console.log(`Unreal says: ${data}`);

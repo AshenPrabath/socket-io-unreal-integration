@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import './App.css';
+import GeminiLive from './components/GeminiLive';
 
 const socket = io('http://localhost:3000');
 
@@ -8,6 +9,8 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
   const [isConnected, setIsConnected] = useState(socket.connected);
+  const [apiKey, setApiKey] = useState('');
+  const [showLive, setShowLive] = useState(false);
   const messagesEndRef = useRef(null);
 
   const scrollToBottom = () => {
@@ -57,6 +60,26 @@ function App() {
             {isConnected ? 'Connected' : 'Disconnected'}
           </div>
         </div>
+
+        <div className="api-key-input-container" style={{ padding: '0 24px 10px' }}>
+          <input
+            type="password"
+            placeholder="Enter Gemini API Key (for Live Mode)"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            className="chat-input"
+            style={{ fontSize: '0.8rem', padding: '8px 12px' }}
+          />
+          <button
+            className="btn btn-reset"
+            style={{ marginLeft: '10px', fontSize: '0.8rem' }}
+            onClick={() => setShowLive(!showLive)}
+          >
+            {showLive ? 'Hide Live' : 'Show Live'}
+          </button>
+        </div>
+
+        {showLive && <GeminiLive socket={socket} apiKey={apiKey} />}
 
         <div className="messages-list">
           {messages.length === 0 && (
