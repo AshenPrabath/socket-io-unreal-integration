@@ -22,7 +22,22 @@ function App() {
     socket.on('disconnect', () => setIsConnected(false));
 
     socket.on('broadcast_message', (data) => {
-      setMessages((prev) => [...prev, data]);
+      setMessages((prev) => {
+        if (prev.length > 0) {
+          const lastMsg = prev[prev.length - 1];
+          // If the last message is from the same sender, append the text
+          // This creates a single conversational bubble instead of word-by-word bubbles
+          if (lastMsg.sender === data.sender) {
+            const updatedMessages = [...prev];
+            updatedMessages[updatedMessages.length - 1] = {
+              ...lastMsg,
+              text: lastMsg.text + (data.text || "")
+            };
+            return updatedMessages;
+          }
+        }
+        return [...prev, data];
+      });
 
       // Play audio if present and sender is gemini
       if (data.audio && data.sender === 'gemini') {

@@ -42,67 +42,63 @@ const GeminiLive = ({ socket, apiKey }) => {
                         setIsLive(true);
                     },
                     onmessage: async (message) => {
-                        // 1. Handle User Transcription
-                        // Some versions send it in serverContent, others in modelTurn
-                        if (message.serverContent?.userTranscript && socket) {
-                            socket.emit('live_message', { sender: 'user', text: message.serverContent.userTranscript });
-                        }
+                        // 1. Handle Audio Content
+                        const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
+                        if (audio) {
+                            setIsSpeaking(true);
+                            nextStartTimeRef.current = Math.max(
+                                nextStartTimeRef.current,
+                                outputAudioContextRef.current.currentTime,
+                            );
 
-                        // 2. Handle Assistant Turn
-                        const parts = message.serverContent?.modelTurn?.parts;
-                        if (parts) {
-                            parts.forEach(part => {
-                                // Emit Gemini text as fragments for "live" feel
-                                // We'll rely on the SYSTEM_PROMPT to keep it clean
-                                if (part.text && socket) {
-                                    socket.emit('live_message', { sender: 'gemini', text: part.text });
+                            const audioData = atob(audio.data);
+                            const audioBytes = new Uint8Array(audioData.length);
+                            for (let i = 0; i < audioData.length; i++) {
+                                audioBytes[i] = audioData.charCodeAt(i);
+                            }
+
+                            const int16 = new Int16Array(audioBytes.buffer);
+                            const float32 = new Float32Array(int16.length);
+                            for (let i = 0; i < int16.length; i++) {
+                                float32[i] = int16[i] / 32768;
+                            }
+
+                            const audioBuffer = outputAudioContextRef.current.createBuffer(1, float32.length, 24000);
+                            audioBuffer.getChannelData(0).set(float32);
+
+                            const source = outputAudioContextRef.current.createBufferSource();
+                            source.buffer = audioBuffer;
+                            source.connect(outputAudioContextRef.current.destination);
+                            source.addEventListener("ended", () => {
+                                sourcesRef.current.delete(source);
+                                if (sourcesRef.current.size === 0) {
+                                    setIsSpeaking(false);
                                 }
                             });
+                            source.start(nextStartTimeRef.current);
+                            nextStartTimeRef.current += audioBuffer.duration;
+                            sourcesRef.current.add(source);
+                        }
 
-                            const audio = parts.find(p => p.inlineData)?.inlineData;
-                            if (audio) {
-                                setIsSpeaking(true);
-                                nextStartTimeRef.current = Math.max(
-                                    nextStartTimeRef.current,
-                                    outputAudioContextRef.current.currentTime,
-                                );
+                        // 2. Handle Input Transcription (What the user said)
+                        const inputTranscript = message.serverContent?.inputTranscription?.text;
+                        if (inputTranscript && socket) {
+                            socket.emit('live_message', { sender: 'user', text: inputTranscript });
+                        }
 
-                                const audioData = atob(audio.data);
-                                const audioBytes = new Uint8Array(audioData.length);
-                                for (let i = 0; i < audioData.length; i++) {
-                                    audioBytes[i] = audioData.charCodeAt(i);
-                                }
-
-                                const int16 = new Int16Array(audioBytes.buffer);
-                                const float32 = new Float32Array(int16.length);
-                                for (let i = 0; i < int16.length; i++) {
-                                    float32[i] = int16[i] / 32768;
-                                }
-
-                                const audioBuffer = outputAudioContextRef.current.createBuffer(1, float32.length, 24000);
-                                audioBuffer.getChannelData(0).set(float32);
-
-                                const source = outputAudioContextRef.current.createBufferSource();
-                                source.buffer = audioBuffer;
-                                source.connect(outputAudioContextRef.current.destination);
-                                source.addEventListener("ended", () => {
-                                    sourcesRef.current.delete(source);
-                                    if (sourcesRef.current.size === 0) {
-                                        setIsSpeaking(false);
-                                    }
-                                });
-                                source.start(nextStartTimeRef.current);
-                                nextStartTimeRef.current += audioBuffer.duration;
-                                sourcesRef.current.add(source);
-                            }
+                        // 3. Handle Output Transcription (What the model said)
+                        const outputTranscript = message.serverContent?.outputTranscription?.text;
+                        if (outputTranscript && socket) {
+                            socket.emit('live_message', { sender: 'gemini', text: outputTranscript });
                         }
 
                         if (message.serverContent?.turnComplete) {
-                            setIsSpeaking(false);
+                            console.log("Turn complete");
                             setStatus("Your turn - speak!");
                         }
 
                         if (message.serverContent?.interrupted) {
+                            console.log("Interrupted");
                             for (const source of sourcesRef.current.values()) {
                                 try { source.stop(); } catch (e) { }
                                 sourcesRef.current.delete(source);
@@ -128,6 +124,8 @@ const GeminiLive = ({ socket, apiKey }) => {
                     speechConfig: {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } },
                     },
+                    inputAudioTranscription: {},
+                    outputAudioTranscription: {},
                 },
             });
         } catch (e) {
