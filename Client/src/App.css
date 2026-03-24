@@ -77,6 +77,8 @@
   font-size: 0.95rem;
   line-height: 1.5;
   animation: fadeIn 0.3s ease-out;
+  white-space: pre-wrap;
+  word-wrap: break-word;
 }
 
 @keyframes fadeIn {

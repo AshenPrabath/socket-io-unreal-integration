@@ -4,7 +4,7 @@ import { GoogleGenAI, Modality } from "@google/genai";
 const SYSTEM_PROMPT = `You are the Virtual Floor Assistant at HNB Priority Banking, Sri Lanka.
 Help customers with directions, queue numbers, and banking services.
 Be warm, professional, and concise (1-3 sentences).
-Respond in the same language the customer uses.
+Respond in the same language the customer uses. But only in English, Tamil or Sinhala. in your first time, ask what language you prefer. then stick with that language only until user say change the language
 IMPORTANT: You must output both AUDIO and the exact transcript of that audio as TEXT.
 DO NOT OUTPUT ANY INTERNAL THOUGHTS OR DESCRIPTIONS.
 ONLY OUTPUT WHAT YOU ARE SPEAKING.`;
@@ -25,6 +25,8 @@ const GeminiLive = ({ socket, apiKey }) => {
     const scriptProcessorRef = useRef(null);
     const sourcesRef = useRef(new Set());
     const nextStartTimeRef = useRef(0);
+    const textTimeoutsRef = useRef([]);
+    const nextTextEmitTimeRef = useRef(0);
 
     const initSession = async (client) => {
         try {
@@ -42,6 +44,9 @@ const GeminiLive = ({ socket, apiKey }) => {
                         setIsLive(true);
                     },
                     onmessage: async (message) => {
+                        let currentAudioStart = 0;
+                        let currentAudioDuration = 0;
+
                         // 1. Handle Audio Content
                         const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
                         if (audio) {
@@ -50,6 +55,7 @@ const GeminiLive = ({ socket, apiKey }) => {
                                 nextStartTimeRef.current,
                                 outputAudioContextRef.current.currentTime,
                             );
+                            currentAudioStart = nextStartTimeRef.current;
 
                             const audioData = atob(audio.data);
                             const audioBytes = new Uint8Array(audioData.length);
@@ -65,6 +71,7 @@ const GeminiLive = ({ socket, apiKey }) => {
 
                             const audioBuffer = outputAudioContextRef.current.createBuffer(1, float32.length, 24000);
                             audioBuffer.getChannelData(0).set(float32);
+                            currentAudioDuration = audioBuffer.duration;
 
                             const source = outputAudioContextRef.current.createBufferSource();
                             source.buffer = audioBuffer;
@@ -89,7 +96,34 @@ const GeminiLive = ({ socket, apiKey }) => {
                         // 3. Handle Output Transcription (What the model said)
                         const outputTranscript = message.serverContent?.outputTranscription?.text;
                         if (outputTranscript && socket) {
-                            socket.emit('live_message', { sender: 'gemini', text: outputTranscript });
+                            const tokens = outputTranscript.match(/\S+\s*/g) || [outputTranscript];
+                            let durationPerToken = 0.3; // Fallback 300ms per token
+                            let emitStartTime = outputAudioContextRef.current.currentTime;
+
+                            if (currentAudioDuration > 0) {
+                                // Sync exactly with the accompanying audio chunk
+                                durationPerToken = currentAudioDuration / Math.max(tokens.length, 1);
+                                emitStartTime = currentAudioStart;
+                            } else {
+                                // Resume from where previous text left off, or now
+                                emitStartTime = Math.max(
+                                    outputAudioContextRef.current.currentTime,
+                                    nextTextEmitTimeRef.current || 0
+                                );
+                            }
+
+                            tokens.forEach((token, index) => {
+                                const targetTime = emitStartTime + (index * durationPerToken);
+                                const delayMs = Math.max(0, (targetTime - outputAudioContextRef.current.currentTime) * 1000);
+                                
+                                const timeoutId = setTimeout(() => {
+                                    socket.emit('live_message', { sender: 'gemini', text: token });
+                                }, delayMs);
+                                
+                                textTimeoutsRef.current.push(timeoutId);
+                            });
+
+                            nextTextEmitTimeRef.current = emitStartTime + (tokens.length * durationPerToken);
                         }
 
                         if (message.serverContent?.turnComplete) {
@@ -104,7 +138,12 @@ const GeminiLive = ({ socket, apiKey }) => {
                                 sourcesRef.current.delete(source);
                             }
                             nextStartTimeRef.current = 0;
+                            nextTextEmitTimeRef.current = 0;
                             setIsSpeaking(false);
+                            
+                            // Clear queued text emissions
+                            textTimeoutsRef.current.forEach(clearTimeout);
+                            textTimeoutsRef.current = [];
                         }
                     },
                     onerror: (e) => {
@@ -232,6 +271,9 @@ const GeminiLive = ({ socket, apiKey }) => {
             stopRecording();
             if (sessionRef.current) {
                 try { sessionRef.current.close(); } catch (e) { }
+            }
+            if (textTimeoutsRef.current) {
+                textTimeoutsRef.current.forEach(clearTimeout);
             }
         };
     }, []);

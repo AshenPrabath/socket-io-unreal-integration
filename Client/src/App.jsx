@@ -29,9 +29,23 @@ function App() {
           // This creates a single conversational bubble instead of word-by-word bubbles
           if (lastMsg.sender === data.sender) {
             const updatedMessages = [...prev];
+            
+            const newText = data.text || "";
+            let combinedText = lastMsg.text;
+            
+            if (combinedText && newText) {
+              const needsSpace = !combinedText.endsWith(' ') && 
+                                 !newText.startsWith(' ') && 
+                                 !/^[.,!?;:]/.test(newText);
+              if (needsSpace) {
+                combinedText += ' ';
+              }
+            }
+            combinedText += newText;
+
             updatedMessages[updatedMessages.length - 1] = {
               ...lastMsg,
-              text: lastMsg.text + (data.text || "")
+              text: combinedText
             };
             return updatedMessages;
           }
