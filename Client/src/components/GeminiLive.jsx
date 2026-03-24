@@ -25,8 +25,61 @@ const GeminiLive = ({ socket, apiKey }) => {
     const scriptProcessorRef = useRef(null);
     const sourcesRef = useRef(new Set());
     const nextStartTimeRef = useRef(0);
-    const textTimeoutsRef = useRef([]);
-    const nextTextEmitTimeRef = useRef(0);
+    
+    // Sync logic refs
+    const textQueueRef = useRef([]);
+    const syncTickerRef = useRef(null);
+    const nextTokenEmitTimeRef = useRef(0);
+    const isTurnActiveRef = useRef(false);
+
+    const startSyncTicker = () => {
+        if (syncTickerRef.current) return;
+        
+        const tick = () => {
+            if (outputAudioContextRef.current && textQueueRef.current.length > 0) {
+                const now = outputAudioContextRef.current.currentTime;
+                
+                // Keep emitting as long as we are behind schedule
+                while (now >= nextTokenEmitTimeRef.current && textQueueRef.current.length > 0) {
+                    // Prevent massive bursts if tab was sleeping
+                    if (now - nextTokenEmitTimeRef.current > 1.0) {
+                        nextTokenEmitTimeRef.current = now;
+                    }
+                    
+                    const audioRemaining = Math.max(0, nextStartTimeRef.current - now);
+                    let rate = 0.2; // default 200ms per word fallback
+                    
+                    if (audioRemaining > 0) {
+                        // Dynamically spread the remaining text over the remaining audio duration
+                        rate = audioRemaining / textQueueRef.current.length;
+                        rate = Math.max(0.08, Math.min(rate, 0.4)); // Cap rate between 80ms and 400ms per word
+                    }
+                    
+                    nextTokenEmitTimeRef.current += rate;
+                    const item = textQueueRef.current.shift();
+                    
+                    if (socket) {
+                        let textToEmit = item.text;
+                        if (item.type === 'word') {
+                            textToEmit += " ";
+                        }
+                        socket.emit('live_message', { sender: 'gemini', text: textToEmit });
+                    }
+                }
+            }
+            syncTickerRef.current = setTimeout(tick, 50);
+        };
+        syncTickerRef.current = setTimeout(tick, 50);
+    };
+
+    const stopSyncTicker = () => {
+        if (syncTickerRef.current) {
+            clearTimeout(syncTickerRef.current);
+            syncTickerRef.current = null;
+        }
+        textQueueRef.current = [];
+        isTurnActiveRef.current = false;
+    };
 
     const initSession = async (client) => {
         try {
@@ -34,6 +87,8 @@ const GeminiLive = ({ socket, apiKey }) => {
                 outputAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
             }
             nextStartTimeRef.current = outputAudioContextRef.current.currentTime;
+
+            startSyncTicker();
 
             sessionRef.current = await client.live.connect({
                 model: "gemini-2.5-flash-native-audio-latest",
@@ -44,9 +99,6 @@ const GeminiLive = ({ socket, apiKey }) => {
                         setIsLive(true);
                     },
                     onmessage: async (message) => {
-                        let currentAudioStart = 0;
-                        let currentAudioDuration = 0;
-
                         // 1. Handle Audio Content
                         const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
                         if (audio) {
@@ -55,7 +107,6 @@ const GeminiLive = ({ socket, apiKey }) => {
                                 nextStartTimeRef.current,
                                 outputAudioContextRef.current.currentTime,
                             );
-                            currentAudioStart = nextStartTimeRef.current;
 
                             const audioData = atob(audio.data);
                             const audioBytes = new Uint8Array(audioData.length);
@@ -71,7 +122,6 @@ const GeminiLive = ({ socket, apiKey }) => {
 
                             const audioBuffer = outputAudioContextRef.current.createBuffer(1, float32.length, 24000);
                             audioBuffer.getChannelData(0).set(float32);
-                            currentAudioDuration = audioBuffer.duration;
 
                             const source = outputAudioContextRef.current.createBufferSource();
                             source.buffer = audioBuffer;
@@ -96,39 +146,23 @@ const GeminiLive = ({ socket, apiKey }) => {
                         // 3. Handle Output Transcription (What the model said)
                         const outputTranscript = message.serverContent?.outputTranscription?.text;
                         if (outputTranscript && socket) {
-                            const tokens = outputTranscript.match(/\S+\s*/g) || [outputTranscript];
-                            let durationPerToken = 0.3; // Fallback 300ms per token
-                            let emitStartTime = outputAudioContextRef.current.currentTime;
-
-                            if (currentAudioDuration > 0) {
-                                // Sync exactly with the accompanying audio chunk
-                                durationPerToken = currentAudioDuration / Math.max(tokens.length, 1);
-                                emitStartTime = currentAudioStart;
-                            } else {
-                                // Resume from where previous text left off, or now
-                                emitStartTime = Math.max(
-                                    outputAudioContextRef.current.currentTime,
-                                    nextTextEmitTimeRef.current || 0
-                                );
+                            if (!isTurnActiveRef.current) {
+                                isTurnActiveRef.current = true;
+                                textQueueRef.current.push({ type: 'signal', text: 'start' });
                             }
-
-                            tokens.forEach((token, index) => {
-                                const targetTime = emitStartTime + (index * durationPerToken);
-                                const delayMs = Math.max(0, (targetTime - outputAudioContextRef.current.currentTime) * 1000);
-                                
-                                const timeoutId = setTimeout(() => {
-                                    socket.emit('live_message', { sender: 'gemini', text: token });
-                                }, delayMs);
-                                
-                                textTimeoutsRef.current.push(timeoutId);
-                            });
-
-                            nextTextEmitTimeRef.current = emitStartTime + (tokens.length * durationPerToken);
+                            const tokens = outputTranscript.match(/\S+/g);
+                            if (tokens) {
+                                textQueueRef.current.push(...tokens.map(t => ({ type: 'word', text: t })));
+                            }
                         }
 
                         if (message.serverContent?.turnComplete) {
                             console.log("Turn complete");
                             setStatus("Your turn - speak!");
+                            if (isTurnActiveRef.current) {
+                                textQueueRef.current.push({ type: 'signal', text: 'end' });
+                                isTurnActiveRef.current = false;
+                            }
                         }
 
                         if (message.serverContent?.interrupted) {
@@ -138,12 +172,12 @@ const GeminiLive = ({ socket, apiKey }) => {
                                 sourcesRef.current.delete(source);
                             }
                             nextStartTimeRef.current = 0;
-                            nextTextEmitTimeRef.current = 0;
+                            nextTokenEmitTimeRef.current = 0;
                             setIsSpeaking(false);
                             
-                            // Clear queued text emissions
-                            textTimeoutsRef.current.forEach(clearTimeout);
-                            textTimeoutsRef.current = [];
+                            // Clear pending text
+                            textQueueRef.current = [];
+                            isTurnActiveRef.current = false;
                         }
                     },
                     onerror: (e) => {
@@ -155,6 +189,7 @@ const GeminiLive = ({ socket, apiKey }) => {
                         console.log("Closed:", e.reason);
                         setStatus("Disconnected: " + (e.reason || "unknown"));
                         setIsLive(false);
+                        stopSyncTicker();
                     },
                 },
                 config: {
@@ -163,6 +198,7 @@ const GeminiLive = ({ socket, apiKey }) => {
                     speechConfig: {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } },
                     },
+                    // THESE CRITICAL SETTINGS ENABLE TEXT OUTPUT WHEN MODALITY IS AUDIO
                     inputAudioTranscription: {},
                     outputAudioTranscription: {},
                 },
@@ -269,11 +305,9 @@ const GeminiLive = ({ socket, apiKey }) => {
         return () => {
             isRecordingRef.current = false;
             stopRecording();
+            stopSyncTicker();
             if (sessionRef.current) {
                 try { sessionRef.current.close(); } catch (e) { }
-            }
-            if (textTimeoutsRef.current) {
-                textTimeoutsRef.current.forEach(clearTimeout);
             }
         };
     }, []);
