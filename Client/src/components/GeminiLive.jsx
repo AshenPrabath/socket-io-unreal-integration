@@ -31,6 +31,10 @@ const GeminiLive = ({ socket, apiKey }) => {
     const syncTickerRef = useRef(null);
     const nextTokenEmitTimeRef = useRef(0);
     const isTurnActiveRef = useRef(false);
+    
+    // Custom VAD refs
+    const silenceConsecutiveChunksRef = useRef(0);
+    const hasSpokenThisTurnRef = useRef(false);
 
     const startSyncTicker = () => {
         if (syncTickerRef.current) return;
@@ -238,23 +242,65 @@ const GeminiLive = ({ socket, apiKey }) => {
         try {
             await inputAudioContextRef.current.resume();
 
-            mediaStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-            sourceNodeRef.current = inputAudioContextRef.current.createMediaStreamSource(mediaStreamRef.current);
+            mediaStreamRef.current = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                    sampleRate: 16000,
+                    channelCount: 1
+                } 
+            });            sourceNodeRef.current = inputAudioContextRef.current.createMediaStreamSource(mediaStreamRef.current);
 
-            scriptProcessorRef.current = inputAudioContextRef.current.createScriptProcessor(256, 1, 1);
+            scriptProcessorRef.current = inputAudioContextRef.current.createScriptProcessor(1024, 1, 1);
             scriptProcessorRef.current.onaudioprocess = (e) => {
                 if (!sessionRef.current || !isRecordingRef.current) return;
 
                 const pcmData = e.inputBuffer.getChannelData(0);
+                
+                // Custom Voice Activity Detection (VAD)
+                let sumSquares = 0;
                 const int16 = new Int16Array(pcmData.length);
+                
                 for (let i = 0; i < pcmData.length; i++) {
+                    // Collect RMS volume
+                    sumSquares += pcmData[i] * pcmData[i];
+                    // Convert to Float32 to Int16
                     int16[i] = Math.max(-32768, Math.min(32767, pcmData[i] * 32768));
                 }
 
+                const rms = Math.sqrt(sumSquares / pcmData.length);
+                
+                if (rms < 0.01) {
+                    silenceConsecutiveChunksRef.current += 1;
+                    // 1024 chunks @ 16kHz = 64ms. 10 * 64ms = 640ms of silence.
+                    if (hasSpokenThisTurnRef.current && silenceConsecutiveChunksRef.current === 10) {
+                        console.log("Custom VAD: 640ms silence detected. Firing turnComplete.");
+                        try {
+                            sessionRef.current.send({ clientContent: { turnComplete: true } });
+                        } catch (err) {
+                            console.error("VAD Send Error:", err);
+                        }
+                        hasSpokenThisTurnRef.current = false;
+                    }
+
+                    // CRITICAL FIX: To prevent massive server-side buffer lag during long idle periods (1-2 mins):
+                    // Stop sending microphone packets over the network if silence exceeds 15 chunks (~1 second).
+                    // This clears the WebSocket pipeline so Gemini responds instantly when you speak again.
+                    if (silenceConsecutiveChunksRef.current > 15) {
+                        return; // Drop empty frame
+                    }
+                } else {
+                    hasSpokenThisTurnRef.current = true;
+                    silenceConsecutiveChunksRef.current = 0;
+                }
+
+                // Optimized Base64 encoding to prevent UI thread blocking
                 const bytes = new Uint8Array(int16.buffer);
                 let binary = "";
-                for (let i = 0; i < bytes.length; i++) {
-                    binary += String.fromCharCode(bytes[i]);
+                const chunkSize = 8000;
+                for (let i = 0; i < bytes.length; i += chunkSize) {
+                    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
                 }
                 const base64 = btoa(binary);
 
